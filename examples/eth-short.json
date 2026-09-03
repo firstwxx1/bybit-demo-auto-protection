@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-07-21T09:01:36.773Z",
+  "position": {
+    "instrument": "ETH-USDT-SWAP",
+    "side": "short",
+    "size": 0.26,
+    "leverage": 10,
+    "entry_price": 1877.53,
+    "mark_price": 1938.31,
+    "unrealized_pnl": -1.5802799999999995,
+    "liquidation_price": 2059.5596681831503
+  },
+  "candles": [
+    {"high": 1879.81, "low": 1841.0}
+  ],
+  "grok": {"available": false, "summary": "模型超时"},
+  "risk_model": {"available": false, "error": "模型超时"}
+}
