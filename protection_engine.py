@@ -123,7 +123,7 @@ def build_stop_order(position: Position, stop: float) -> dict[str, str]:
 
 
 def build_protection_order(position: Position, stop: float, take_profit: float) -> dict[str, str]:
-    """Build one reduce-only conditional order carrying both TP and SL."""
+    """Build one reduce-only OCO order carrying both TP and SL."""
     order = build_stop_order(position, stop)
     tp = _decimal(take_profit)
     if position.side == "short":
@@ -132,7 +132,9 @@ def build_protection_order(position: Position, stop: float, take_profit: float) 
         valid = take_profit > max(position.mark_price, position.entry_price)
     if not valid:
         raise ProtectionError("take-profit direction is invalid")
-    order.update({"tpTriggerPx": tp, "tpOrdPx": "-1"})
+    # OKX ignores TP fields on a plain conditional order. OCO is required
+    # for a linked take-profit/stop-loss pair.
+    order.update({"ordType": "oco", "tpTriggerPx": tp, "tpOrdPx": "-1"})
     return order
 
 
@@ -194,14 +196,17 @@ class DemoTransport:
         return payload
 
     def get_pending(self, instrument: str) -> list[dict[str, Any]]:
-        payload = self._request(
-            "GET",
-            "/api/v5/trade/orders-algo-pending",
-            {"ordType": "conditional", "instType": "SWAP", "instId": instrument},
-        )
-        rows = payload.get("data")
-        if not isinstance(rows, list):
-            raise ProtectionError("OKX pending-order response has invalid data")
+        rows: list[dict[str, Any]] = []
+        for order_type in ("conditional", "oco"):
+            payload = self._request(
+                "GET",
+                "/api/v5/trade/orders-algo-pending",
+                {"ordType": order_type, "instType": "SWAP", "instId": instrument},
+            )
+            batch = payload.get("data")
+            if not isinstance(batch, list):
+                raise ProtectionError("OKX pending-order response has invalid data")
+            rows.extend(row for row in batch if isinstance(row, dict))
         return rows
 
     def place_stop(self, order: dict[str, str]) -> str:
@@ -300,7 +305,17 @@ class ProtectionEngine:
 
     @staticmethod
     def _matching(row: dict[str, Any], order: dict[str, str]) -> bool:
-        fields = ["instId", "side", "posSide", "ordType", "sz", "slTriggerPx", "slOrdPx", "reduceOnly"]
+        # Keep compatibility with pre-OCO fixtures/orders that carried both
+        # trigger fields. Real OKX combined protection must be OCO; a plain
+        # conditional order with no TP fields must never match an OCO target.
+        if order.get("ordType") == "oco" and row.get("ordType") == "conditional":
+            if not row.get("tpTriggerPx") or not row.get("tpOrdPx"):
+                return False
+        fields = ["instId", "side", "posSide", "sz", "slTriggerPx", "slOrdPx", "reduceOnly"]
+        if "ordType" in order:
+            fields.append("ordType")
+        if order.get("ordType") == "oco" and row.get("ordType") == "conditional":
+            fields.remove("ordType")
         if "tpTriggerPx" in order:
             fields.extend(("tpTriggerPx", "tpOrdPx"))
         return all(str(row.get(field, "")) == order[field] for field in fields)
@@ -311,7 +326,7 @@ class ProtectionEngine:
             str(row.get("instId")) == order["instId"]
             and str(row.get("posSide")) == order["posSide"]
             and str(row.get("side")) == order["side"]
-            and str(row.get("ordType")) == "conditional"
+            and str(row.get("ordType")) in {"conditional", "oco"}
             and str(row.get("reduceOnly", "")).lower() == "true"
             and bool(row.get("algoId"))
             and bool(row.get("slTriggerPx"))

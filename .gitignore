@@ -1,0 +1,17 @@
+# Secrets and local configuration
+.env
+
+# Python environments and generated files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime output and local state
+logs/
+state/
+
+# Local backups
+*.backup
+crontab.backup-*
+*.pre-oco-*
