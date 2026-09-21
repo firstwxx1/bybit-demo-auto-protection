@@ -1,4 +1,4 @@
-"""Telegram Bot API notifier for OKX demo risk reports.
+"""Telegram Bot API notifier for Bybit Demo risk reports.
 
 Sends text messages via the Telegram Bot API. Long messages are automatically
 split to respect the 4096-character limit.
@@ -45,7 +45,7 @@ def send_telegram(
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "okx-demo-risk-reporter/2.0",
+                "User-Agent": "bybit-demo-risk-reporter/1.0",
             },
         )
         try:

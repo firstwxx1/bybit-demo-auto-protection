@@ -86,7 +86,8 @@ def evaluate_decision(position: dict[str, Any], news: dict[str, Any], model_resu
     now = now or datetime.now(timezone.utc)
     if max_age_seconds is None:
         max_age_seconds = _configured_max_age_seconds()
-    if not isinstance(position, dict) or not str(position.get("instrument", "")).endswith("-SWAP"):
+    instrument = str(position.get("instrument", "")) if isinstance(position, dict) else ""
+    if not isinstance(position, dict) or not (instrument.endswith("-SWAP") or instrument.endswith("USDT")):
         raise DecisionError("only an existing perpetual position is eligible")
     snapshot = evidence_snapshot if isinstance(evidence_snapshot, dict) else {
         "position": position, "candles": candles if isinstance(candles, list) else [],

@@ -1,18 +1,20 @@
 {
-  "timestamp": "2026-07-21T09:01:36.773Z",
+  "timestamp": "2026-09-21T08:00:00Z",
   "position": {
-    "instrument": "ETH-USDT-SWAP",
+    "instrument": "ETHUSDT",
     "side": "short",
     "size": 0.26,
     "leverage": 10,
     "entry_price": 1877.53,
     "mark_price": 1938.31,
-    "unrealized_pnl": -1.5802799999999995,
-    "liquidation_price": 2059.5596681831503
+    "unrealized_pnl": -1.58,
+    "liquidation_price": 2059.56,
+    "margin_mode": "cross",
+    "position_side": "net"
   },
   "candles": [
-    {"high": 1879.81, "low": 1841.0}
+    {"ts": "2026-09-21T07:00:00Z", "open": 1930, "high": 1940, "low": 1920, "close": 1938, "volume": 1000}
   ],
-  "grok": {"available": false, "summary": "模型超时"},
-  "risk_model": {"available": false, "error": "模型超时"}
+  "grok": {"available": false, "summary": "offline fixture"},
+  "risk_model": {"available": false, "error": "offline fixture"}
 }

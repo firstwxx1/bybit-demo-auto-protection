@@ -1,18 +1,18 @@
-"""GPT-driven automatic TP/SL protection runner for OKX demo.
+"""GPT-driven automatic TP/SL protection runner for Bybit mainnet Demo Trading.
 
 This module is the main 30-minute cycle entry point. It:
 
-1. Fetches live OKX demo positions (read-only GET).
+1. Fetches live Bybit Demo positions (read-only GET).
 2. For each position, fetches 4H candles, calls Grok (news) + GPT (risk analysis).
 3. Generates the risk report (same format as the existing reporter).
 4. Extracts validated TP/SL prices from the report.
 5. If PROTECTION_EXECUTION_ENABLED=true, places reduce-only conditional orders
-   (TP+SL) on OKX demo. Orders are reconciled each cycle: existing matching
+   (TP+SL) on Bybit Demo. Protection is updated each cycle for live positions.
    orders are kept; stale ones are replaced.
 6. Sends the report to Telegram via the bot API.
 
 Security boundaries (unchanged from the original project):
-- Only OKX demo (x-simulated-trading: 1).
+- Only Bybit Demo (`api-demo.bybit.com`).
 - Only reduceOnly conditional orders; never opens, adds, or reverses.
 - Stale (cached) positions never trigger order placement.
 - Circuit breaker persists consecutive failures.
@@ -30,9 +30,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from live_reporter import fetch_positions, fetch_candles
+from bybit_live_reporter import fetch_positions, fetch_candles
 from model_clients import grok_news, risk_analysis, independent_risk_analysis
-from okx_demo_risk_reporter import (
+from bybit_risk_reporter import (
     Position,
     build_report,
     fib_targets,
@@ -40,17 +40,14 @@ from okx_demo_risk_reporter import (
     fixed_stop,
     validate_stop,
 )
-from protection_engine import (
-    DemoTransport,
-    ProtectionEngine,
-    ProtectionError,
-    build_protection_order,
-    build_stop_order,
-)
-from protection_runner import env_enabled
+from bybit_adapter import BybitDemoClient, BybitProtectionEngine, BybitError
 from telegram_notifier import send_telegram
 
-OKX_BASE_URL = "https://www.okx.com"
+BYBIT_BASE_URL = "https://api-demo.bybit.com"
+
+
+def env_enabled(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _extract_validated_prices(report: str) -> tuple[float | None, float | None]:
@@ -160,7 +157,7 @@ def run_auto_cycle(
             realtime_receipt = None
 
     if not positions:
-        report_text = "【OKX模拟盘量化风险报告】\n当前OKX实际永续持仓为空；不执行交易。"
+        report_text = "【Bybit Demo量化风险报告】\n当前Bybit线性永续持仓为空；不执行交易。"
         tg_result = send_telegram(_format_telegram_report(report_text, [])) if send_tg else {"ok": False, "skipped": True}
         return {"report": report_text, "protection_results": [], "telegram": tg_result}
 
@@ -198,7 +195,7 @@ def run_auto_cycle(
         except (ValueError, TypeError):
             fib = {"valid": False, "reason": "行情证据无效", "as_of": captured_at}
 
-        from protection_engine import evaluate_fib_close_candidate
+        from bybit_protection_core import evaluate_fib_close_candidate
         fib_close_candidate = evaluate_fib_close_candidate(
             position, fib, {}, now=datetime.fromisoformat(captured_at)
         )
@@ -248,80 +245,16 @@ def run_auto_cycle(
 
     # --- 4. Execute protection ---
     if enabled and not cached_at and candidates:
-        transport = DemoTransport(
-            OKX_BASE_URL,
-            os.getenv("OKX_DEMO_API_KEY", ""),
-            os.getenv("OKX_DEMO_API_SECRET", ""),
-            os.getenv("OKX_DEMO_PASSPHRASE", ""),
+        client = BybitDemoClient(
+            os.getenv("BYBIT_DEMO_API_KEY", ""),
+            os.getenv("BYBIT_DEMO_API_SECRET", ""),
+            os.getenv("BYBIT_API_BASE", BYBIT_BASE_URL),
             timeout=float(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
         )
-        engine = ProtectionEngine(
-            transport,
-            state_path,
-            enabled=True,
-            failure_limit=failure_limit,
+        engine = BybitProtectionEngine(client, state_path, enabled=True)
+        all_protection_results.extend(
+            engine.reconcile_dynamic(positions, candidates, cached_at=cached_at)
         )
-        # Separate TP+SL candidates from SL-only candidates
-        full_candidates = {
-            inst: c for inst, c in candidates.items() if c.get("take_profit") is not None
-        }
-        sl_only_candidates = {
-            inst: c["stop_loss"] for inst, c in candidates.items() if c.get("take_profit") is None
-        }
-
-        if full_candidates:
-            all_protection_results.extend(
-                engine.reconcile_dynamic(positions, full_candidates, cached_at=cached_at)
-            )
-
-        # For SL-only positions, use reconcile with fixed stop override
-        # We need a custom approach: use reconcile_dynamic with a synthetic TP
-        # that will be rejected, or better: extend reconcile to handle SL-only.
-        # For now, SL-only uses the fixed reconcile path.
-        if sl_only_candidates:
-            # Place stop-loss only orders via direct engine calls
-            for inst, sl_price in sl_only_candidates.items():
-                pos_snapshot = next(
-                    (p for p in positions if p.get("instrument") == inst), None
-                )
-                if not pos_snapshot:
-                    continue
-                try:
-                    pos_obj = position_from_snapshot(pos_snapshot)
-                    order = build_stop_order(pos_obj, sl_price)
-                    pending = transport.get_pending(inst)
-                    from protection_engine import ProtectionEngine as PE
-                    matches = [
-                        row for row in pending
-                        if PE._matching(row, order)
-                    ]
-                    if matches:
-                        all_protection_results.append({
-                            "instrument": inst, "status": "PROTECTED",
-                            "algoId": matches[0].get("algoId", ""),
-                        })
-                        continue
-                    old_ids = [
-                        str(row["algoId"]) for row in pending
-                        if PE._owned_protection(row, order)
-                    ]
-                    new_id = transport.place_stop(order)
-                    if old_ids:
-                        transport.cancel(inst, old_ids)
-                        all_protection_results.append({
-                            "instrument": inst, "status": "REPLACED",
-                            "algoId": new_id, "stop_loss": order["slTriggerPx"],
-                        })
-                    else:
-                        all_protection_results.append({
-                            "instrument": inst, "status": "CREATED",
-                            "algoId": new_id, "stop_loss": order["slTriggerPx"],
-                        })
-                except (OSError, KeyError, TypeError, ValueError, ProtectionError) as exc:
-                    all_protection_results.append({
-                        "instrument": inst, "status": "ERROR",
-                        "error": type(exc).__name__,
-                    })
 
     elif enabled and cached_at:
         all_protection_results = [
@@ -348,7 +281,7 @@ def run_auto_cycle(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="OKX demo GPT auto TP/SL protection runner (30-min cycle)"
+        description="Bybit Demo GPT auto TP/SL protection runner (30-min cycle)"
     )
     parser.add_argument("--fixture", type=Path, help="offline position fixture for testing")
     parser.add_argument("--no-telegram", action="store_true", help="skip Telegram push")
