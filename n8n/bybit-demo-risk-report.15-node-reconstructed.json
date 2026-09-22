@@ -1,0 +1,479 @@
+{
+  "id": "R3c0n15N0d3Risk2026",
+  "name": "Bybit主网Demo量化风险报告（15节点逆向重建+3节点保护桥接）",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Shanghai"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "reconstruction": {
+      "status": "evidence-derived-not-original-export",
+      "historicalReport": "examples/bybit-demo-report-fixture.json",
+      "safety": "Bybit mainnet Demo Trading / paper-only / no direct exchange node",
+      "runtimeContract": "single-readonly-python-entry-then-linear-evidence-validation-and-local-protection-bridge"
+    }
+  },
+  "nodes": [
+    {
+      "id": "01-trigger",
+      "name": "每30分钟触发",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1120,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "02-safety",
+      "name": "模拟盘只读安全门",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -920,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{json:{paper_only:true,trading_mode:'demo',protection_execution:false,active_close_execution:false,started_at:new Date().toISOString()}}];"
+      }
+    },
+    {
+      "id": "03-entry",
+      "name": "执行只读报告入口",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -720,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:38635/report",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"paper_only\":true,\"trading_mode\":\"demo\",\"request_active_close\":false}",
+        "options": {
+          "timeout": 125000
+        }
+      }
+    },
+    {
+      "id": "04-position-cache",
+      "name": "持仓缓存与过期标记",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -520,
+        0
+      ],
+      "parameters": {
+        "jsCode": "if (($json.exitCode ?? 0) !== 0) throw new Error('BLOCKED: reporter failed');\nconst stdout=String($json.stdout||'').trim();\nconst lines=stdout.split(/\\r?\\n/);\nconst metadata=[];\nwhile(lines.length && lines[lines.length-1].trim().startsWith('{')) { try { metadata.unshift(JSON.parse(lines.pop())); } catch { break; } }\nconst report=lines.join('\\n').trim();\nif(!report.includes('Bybit Demo量化风险报告') || !report.includes('不执行交易')) throw new Error('BLOCKED: invalid report envelope');\nconst envelope=metadata.find(value=>value&&value.protection_request)?.protection_request;\nconst position_source=envelope?.position_source || (/数据状态：cache|最近成功缓存/.test(report)?'cache':'realtime');\nreturn [{json:{report,metadata,collector_stderr:String($json.stderr||''),position_source,fail_closed:true}}];"
+      }
+    },
+    {
+      "id": "05-position",
+      "name": "核对实际持仓币种",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const m=$json.report.match(/持仓：([^，\\n]+)/);\nconst instrument=m?.[1]?.trim()||null;\nreturn [{json:{...$json,instrument,fixed_btc:false,position_missing:!instrument}}];"
+      }
+    },
+    {
+      "id": "06-ma",
+      "name": "核对MA5 MA10 MA20 MA60",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const text=String($json.report ?? $json['报错'] ?? '').trim();\nif(!text) throw new Error('BLOCKED: report field missing');\nconst out={};\nfor(const p of [5,10,20,60]) { const m=text.match(new RegExp('MA'+p+'\\\\s*[=：:]\\\\s*([^；\\\\n]+)')); if(!m) throw new Error('BLOCKED: MA'+p+' missing'); out['ma'+p]=m[1].trim(); }\nreturn [{json:{...$json,report:text,moving_averages:out}}];"
+      }
+    },
+    {
+      "id": "07-fib",
+      "name": "核对局部Fib结构",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const text=$json.report;\nconst m1272=text.match(/Fib 1\\.272[=：]([^；\\n]+)/); const m1618=text.match(/Fib 1\\.618[=：]([^；\\n]+)/);\nconst fibLine=text.match(/Fib参考[^\\n]*/)?.[0]||''; const invalid=/摆动不足|无效|N\\/A/.test(fibLine);\nif((!m1272||!m1618) && !invalid) throw new Error('BLOCKED: Fib evidence incomplete');\nreturn [{json:{...$json,fib:{fib_1272:m1272?.[1]?.trim()??null,fib_1618:m1618?.[1]?.trim()??null,valid:!invalid}}}];"
+      }
+    },
+    {
+      "id": "08-news",
+      "name": "核对Grok新闻摘要",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const m=$json.report.match(/新闻(?:状态|摘要)：([^\\n]+)/);\nconst fallback=$json.report.match(/无有效新鲜新闻[^\\n]*传入news_summary为([^，。]+)/);\nif(!m && !fallback) throw new Error('BLOCKED: news status missing');\nconst news=String(m?.[1]||fallback?.[1]).replace(/\\*/g,'').trim();\nreturn [{json:{...$json,news_summary:news,news_credential_boundary:'inside-readonly-entry'}}];"
+      }
+    },
+    {
+      "id": "09-market-evidence",
+      "name": "汇总市场证据",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "if(!$json.moving_averages||!$json.fib||!$json.news_summary) throw new Error('BLOCKED: market evidence incomplete');\nreturn [{json:{...$json,market_evidence_complete:true}}];"
+      }
+    },
+    {
+      "id": "10-risk-model",
+      "name": "核对GPT风险分析",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const report=$json.report;\nconst risk=report.match(/风险等级：([^\\n]+)/)?.[1]?.trim()??'未知';\nconst recommendation=report.match(/建议：([^\\n]+)/)?.[1]?.trim()??'仅观察';\nconst decision=$json.metadata.find(x=>x&&x.decision_id)||null;\nreturn [{json:{...$json,risk_analysis:{risk_level:risk,recommendation,decision},advisory_only:true}}];"
+      }
+    },
+    {
+      "id": "11-stop-validation",
+      "name": "独立止损安全校验",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const line=$json.report.match(/止损校验：([^\\n]+)/)?.[1]?.trim();\nconst stop=$json.report.match(/止损保护(?:建议|告警)：([^\\n]+)/)?.[1]?.trim();\nif(!line||!stop) throw new Error('BLOCKED: stop validation absent');\nreturn [{json:{...$json,stop_validation:{result:line,stop_loss:stop,independent:true}}}];"
+      }
+    },
+    {
+      "id": "12-tp-validation",
+      "name": "止盈与Fib有效性校验",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const line=$json.report.match(/止盈校验：([^\\n]+)/)?.[1]?.trim()||$json.report.match(/止盈建议：([^\\n]+)/)?.[1]?.trim();\nif(!line) throw new Error('BLOCKED: take-profit validation absent');\nreturn [{json:{...$json,take_profit_validation:{result:line,fib_valid:$json.fib.valid}}}];"
+      }
+    },
+    {
+      "id": "13-report",
+      "name": "生成中文风险报告",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{json:{...$json,text:$json.report}}];"
+      }
+    },
+    {
+      "id": "14-output-guard",
+      "name": "报告字段与paper-only校验",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const text=String($json.text||'');\nconst required=['持仓：','风险等级：','止损','MA5','Fib 1.272','新闻','不执行交易'];\nfor(const field of required) if(!text.includes(field)) throw new Error('BLOCKED: missing '+field);\nif(/Bybit真实主网|执行模式：live|api\\.bybit\\.com|api-testnet\\.bybit\\.com|\\/v5\\/order\\/create|\\/v5\\/position\\/trading-stop/.test(text)) throw new Error('BLOCKED: non-demo output');\nconst telegramText=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\*\\*([\\s\\S]*?)\\*\\*/g,'<b>$1</b>');\nreturn [{json:{...$json,text,telegram_text:telegramText,paper_only_validated:true}}];"
+      }
+    },
+    {
+      "id": "15-telegram",
+      "name": "Telegram发送风险报告（保持禁用）",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1680,
+        0
+      ],
+      "disabled": true,
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{$env.TELEGRAM_CHAT_ID}}",
+        "text": "={{$json.telegram_text + ($json.protection_request ? '\\n\\n<b>动态保护委托（同源）</b>\\n止损：' + $json.protection_request.candidates[Object.keys($json.protection_request.candidates)[0]].stop_loss + '\\n止盈：' + $json.protection_request.candidates[Object.keys($json.protection_request.candidates)[0]].take_profit : '\\n\\n<b>保护状态</b>\\n当前无可执行的实时SWAP保护委托')}}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      }
+    },
+    {
+      "id": "16-protection-envelope",
+      "name": "提取动态TP SL保护信封",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const metadata=Array.isArray($json.metadata)?$json.metadata:[];\nconst envelope=metadata.find(value=>value&&value.protection_request)?.protection_request;\nif(!envelope) throw new Error('BLOCKED: realtime dynamic TP/SL envelope missing');\nif(envelope.paper_only!==true||envelope.trading_mode!=='demo'||envelope.report_version!=='risk-report-v1'||envelope.source!=='live_reporter'||envelope.position_source!=='realtime') throw new Error('BLOCKED: invalid realtime protection envelope');\nconst symbols=Object.keys(envelope.candidates||{});\nif(symbols.length!==1 || !/^[A-Z0-9]+USDT$/.test(symbols[0])) throw new Error('BLOCKED: invalid Bybit symbol in protection envelope');\nreturn [{json:{...$json,protection_request:envelope}}];"
+      }
+    },
+    {
+      "id": "17-protection-bridge",
+      "name": "动态TP SL模拟盘保护桥接",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2080,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:38636/protect",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json.protection_request}}",
+        "options": {
+          "timeout": 10000
+        }
+      }
+    },
+    {
+      "id": "18-protection-result-guard",
+      "name": "保护结果安全闸门",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2280,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const bridge=$json;\nif(!['OK','REPORT_ONLY','STALE_POSITION_BLOCKED'].includes(bridge.status)) throw new Error('BLOCKED: protection bridge '+String(bridge.status||'unknown'));\nconst original=$(\"报告字段与paper-only校验\").first().json;\nconst envelope=$(\"提取动态TP SL保护信封\").first().json.protection_request;\nif(!envelope) throw new Error('BLOCKED: protection envelope not retained');\nreturn [{json:{...original,protection_request:envelope,protection_result:bridge}}];"
+      }
+    }
+  ],
+  "connections": {
+    "每30分钟触发": {
+      "main": [
+        [
+          {
+            "node": "模拟盘只读安全门",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "模拟盘只读安全门": {
+      "main": [
+        [
+          {
+            "node": "执行只读报告入口",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "执行只读报告入口": {
+      "main": [
+        [
+          {
+            "node": "持仓缓存与过期标记",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "持仓缓存与过期标记": {
+      "main": [
+        [
+          {
+            "node": "核对实际持仓币种",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "核对实际持仓币种": {
+      "main": [
+        [
+          {
+            "node": "核对MA5 MA10 MA20 MA60",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "核对MA5 MA10 MA20 MA60": {
+      "main": [
+        [
+          {
+            "node": "核对局部Fib结构",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "核对局部Fib结构": {
+      "main": [
+        [
+          {
+            "node": "核对Grok新闻摘要",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "核对Grok新闻摘要": {
+      "main": [
+        [
+          {
+            "node": "汇总市场证据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "汇总市场证据": {
+      "main": [
+        [
+          {
+            "node": "核对GPT风险分析",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "核对GPT风险分析": {
+      "main": [
+        [
+          {
+            "node": "独立止损安全校验",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "独立止损安全校验": {
+      "main": [
+        [
+          {
+            "node": "止盈与Fib有效性校验",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "止盈与Fib有效性校验": {
+      "main": [
+        [
+          {
+            "node": "生成中文风险报告",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "生成中文风险报告": {
+      "main": [
+        [
+          {
+            "node": "报告字段与paper-only校验",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "报告字段与paper-only校验": {
+      "main": [
+        [
+          {
+            "node": "Telegram发送风险报告（保持禁用）",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "提取动态TP SL保护信封",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "提取动态TP SL保护信封": {
+      "main": [
+        [
+          {
+            "node": "动态TP SL模拟盘保护桥接",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "动态TP SL模拟盘保护桥接": {
+      "main": [
+        [
+          {
+            "node": "保护结果安全闸门",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "保护结果安全闸门": {
+      "main": [
+        [
+          {
+            "node": "Telegram发送风险报告（保持禁用）",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": []
+}

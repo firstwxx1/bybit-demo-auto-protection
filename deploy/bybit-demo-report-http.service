@@ -1,0 +1,24 @@
+[Unit]
+Description=Bybit mainnet Demo Trading report HTTP boundary
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bybit-n8n
+Group=bybit-n8n
+WorkingDirectory=/opt/bybit-demo-risk-reporter
+EnvironmentFile=/etc/bybit-demo-risk-reporter.env
+Environment=REPORT_HTTP_PORT=38635
+Environment=BYBIT_API_BASE=https://api-demo.bybit.com
+Environment=BYBIT_TRADING_MODE=demo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /opt/bybit-demo-risk-reporter/report_http_service.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

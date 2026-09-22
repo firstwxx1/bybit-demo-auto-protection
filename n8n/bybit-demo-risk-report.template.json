@@ -1,0 +1,100 @@
+{
+  "name": "Bybit主网Demo只读量化风险报告（模板）",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Shanghai"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "schedule",
+      "name": "每30分钟",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:38635/report",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"paper_only\":true,\"trading_mode\":\"demo\",\"request_active_close\":false}",
+        "options": {
+          "timeout": 125000
+        }
+      },
+      "id": "report",
+      "name": "Bybit Demo只读报告桥接",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{$env.TELEGRAM_CHAT_ID}}",
+        "text": "={{$json.stdout || $json.stderr || \"Bybit Demo报告桥接无输出\"}}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "telegram",
+      "name": "发送Bybit Demo报告",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        20,
+        0
+      ],
+      "disabled": true
+    }
+  ],
+  "connections": {
+    "每30分钟": {
+      "main": [
+        [
+          {
+            "node": "Bybit Demo只读报告桥接",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bybit Demo只读报告桥接": {
+      "main": [
+        [
+          {
+            "node": "发送Bybit Demo报告",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

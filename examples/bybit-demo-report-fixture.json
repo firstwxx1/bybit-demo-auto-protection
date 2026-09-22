@@ -1,0 +1,20 @@
+{
+  "text": "**【Bybit Demo量化风险报告】**\n时间：2026-09-21T08:00:00Z\n**持仓：ETHUSDT，空单，数量=0.26张（Bybit线性合约数量），杠杆=10x，开仓均价=1877.53，标记价=1938.31，未实现盈亏=-1.58 USDT，强平价=2059.56**\n**风险等级：中**\n置信度：0\nGPT状态：模型不可用（固定风控运行中）\n**建议：仅观察**\n**止损保护建议：1968.7**\n**止损校验：通过（fixed）**\n**止盈建议：1877.5281；通过（fixed）**\n止盈来源：near_target\nMA5：1881.44；MA10：1885.12；MA20：1890.33；MA60：1912.77\nFib参考：Fib 1.272：1831.9139；Fib 1.618：1817.0154\n**止盈校验：通过；Fib结构有效**\n**新闻状态：reused**\n数据状态：realtime\n**说明：仅根据Bybit Demo实际持仓币种分析；不执行交易。**",
+  "metadata": {
+    "decision_id": "offline-fixture",
+    "protection_request": {
+      "paper_only": true,
+      "trading_mode": "demo",
+      "report_version": "risk-report-v1",
+      "source": "live_reporter",
+      "position_source": "realtime",
+      "captured_at": "2026-09-21T08:00:00+00:00",
+      "candidates": {
+        "ETHUSDT": {
+          "stop_loss": 1968.7,
+          "take_profit": 1877.5281
+        }
+      }
+    }
+  }
+}

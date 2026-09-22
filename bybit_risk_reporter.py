@@ -378,7 +378,7 @@ def build_report(snapshot: dict[str, Any], *, stop_pct: float | None = None) -> 
         f"4. 当前未实现盈亏为{pos.unrealized_pnl:g} USDT。",
     ]
     return "\n".join([
-        "**【量化风险报告】**",
+        "**【Bybit Demo量化风险报告】**",
         f"时间：{snapshot.get('timestamp', datetime.now(timezone.utc).isoformat())}",
         f"**持仓：{pos.instrument}，{'多单' if pos.side == 'long' else '空单'}，数量={pos.size:g}{pos.size_unit}（Bybit线性合约数量），杠杆={pos.leverage:g}x，开仓均价={pos.entry_price:g}，标记价={pos.mark_price:g}，未实现盈亏={pos.unrealized_pnl:g} USDT，强平价={liq}**",
         f"**风险等级：{model.get('risk_level', '模型不可用（固定风控运行中）') if model_ok else '模型不可用（固定风控运行中）'}**",
