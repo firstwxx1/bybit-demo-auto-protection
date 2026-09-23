@@ -294,6 +294,7 @@ def render_menu(values: dict[str, str] | None = None) -> str:
         "║  3. Telegram    （机器人 token / 聊天 ID）               ",
         "║  4. 保护参数    （止损 / 止盈 / 缓存 / 熔断）            ",
         "║  5. 查看完整配置                                        ",
+        "║  I. 一键部署服务（Ubuntu/Debian VPS，需 root）           ",
         "║                                                          ",
         "║  【运行】                                                ",
         "║  6. 运行完整周期（报告 + 止盈止损 + TG 推送）             ",
@@ -303,6 +304,7 @@ def render_menu(values: dict[str, str] | None = None) -> str:
         "║                                                          ",
         "║  【开关】                                                ",
         "║  A. 切换保护执行开关（默认关闭）                         ",
+        "║     主动平仓开关固定关闭，需人工改环境文件才能启用       ",
         "║                                                          ",
         "║  【诊断】                                                ",
         "║  B. 测试 Telegram 连接                                   ",
@@ -682,6 +684,22 @@ def _action_run_tests() -> None:
 # 主循环
 # ============================================================
 
+def _action_install_services(path: Path) -> None:
+    """Run the supported Ubuntu/Debian one-click installer as root."""
+    installer = ROOT / "deploy" / "install_bybit_demo.sh"
+    if not installer.is_file():
+        print("  未找到部署安装器，请先更新完整仓库。")
+        return
+    if platform.system() != "Linux":
+        print("  一键服务器部署仅支持 Ubuntu/Debian VPS；Windows 请使用本地运行模式。")
+        return
+    if os.geteuid() != 0:
+        print("  请从服务器控制面板的 root 终端运行安装器：")
+        print(f"  sudo bash {installer}")
+        return
+    subprocess.run(["bash", str(installer)], cwd=ROOT, check=False)
+
+
 def run_menu(path: Path = ENV_PATH) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -692,6 +710,8 @@ def run_menu(path: Path = ENV_PATH) -> None:
         "3": lambda: _action_configure_telegram(path),
         "4": lambda: _action_configure_protection(path),
         "5": lambda: _action_full_status(path),
+        "I": lambda: _action_install_services(path),
+        "i": lambda: _action_install_services(path),
         # 运行
         "6": lambda: _action_run_auto_cycle(path),
         "7": lambda: _action_run_report_only(path),

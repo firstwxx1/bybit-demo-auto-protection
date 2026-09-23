@@ -166,19 +166,34 @@ n8n 只需要访问两个 loopback 地址：
 - `POST http://127.0.0.1:38635/report`
 - `POST http://127.0.0.1:38636/protect`
 
-## systemd 部署
+## 控制面板一键部署（Ubuntu/Debian VPS）
 
-两个 service 文件默认假定代码目录为 `/opt/bybit-demo-risk-reporter`、运行用户为 `bybit-n8n`，并从 `/etc/bybit-demo-risk-reporter.env` 读取环境变量：
+支持 aaPanel/宝塔等面板提供的 **主机 root 终端**，不需要手工创建 Python 环境或 systemd 文件：
+
+1. 在面板的 Git/文件管理功能中，将本仓库克隆到服务器目录，例如 `/opt/bybit-demo-risk-reporter`。也可以在终端执行：
+   `git clone https://github.com/firstwxx1/bybit-demo-auto-protection.git /opt/bybit-demo-risk-reporter`
+2. 打开控制面板的服务器终端，以 root 身份运行：
+   `bash /opt/bybit-demo-risk-reporter/deploy/install_bybit_demo.sh`
+3. 安装器会安装 Python 依赖、建立专用运行账户和虚拟环境、生成 `.env`、安装并启动两个本机服务、运行离线测试，然后打开中文配置面板。
+4. 在配置面板选择 `1` 填入 Bybit 主网 Demo Trading API Key/Secret；可选的模型和 Telegram 分别选择 `2`、`3`。密钥输入不回显，配置文件权限为 `600`。
+5. 保持 `PROTECTION_EXECUTION_ENABLED=false` 和 `ACTIVE_CLOSE_EXECUTION_ENABLED=false`，先验证报告与 n8n 工作流。
+
+安装器针对 Ubuntu/Debian + systemd。请在 VPS **主机终端**运行，不要在 Docker 容器内运行。它不会开放公网端口；两个 bridge 仅监听 `127.0.0.1`。服务单元会按实际仓库目录生成，因此仓库不在 `/opt/bybit-demo-risk-reporter` 时也可安装；若使用不同目录，n8n 工作流中的 bridge 地址仍是 loopback，需要在同一网络环境运行 n8n。
+
+安装完成后，在服务器上检查：
 
 ```bash
-sudo cp deploy/bybit-demo-report-http.service /etc/systemd/system/
-sudo cp deploy/bybit-demo-dynamic-protection.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bybit-demo-report-http.service
-sudo systemctl enable --now bybit-demo-dynamic-protection.service
+curl http://127.0.0.1:38635/healthz
+curl http://127.0.0.1:38636/healthz
+systemctl status bybit-demo-report-http.service --no-pager
+systemctl status bybit-demo-dynamic-protection.service --no-pager
 ```
 
-只让 n8n 所在机器或本机访问两个端口；service 已绑定 loopback。先确认健康检查：
+## systemd 部署
+
+推荐使用上面的 `deploy/install_bybit_demo.sh`，它会自动按当前仓库目录生成服务文件、配置环境文件并启动服务。若需要手动安装，请将 service 文件中的 `@APP_DIR@` 替换成仓库绝对路径后，再复制到 `/etc/systemd/system/`；服务读取仓库根目录的 `.env` 文件。
+
+服务仅绑定 loopback，不要对公网开放 `38635` 或 `38636`。健康检查：
 
 ```bash
 curl http://127.0.0.1:38635/healthz

@@ -7,13 +7,13 @@ Wants=network-online.target
 Type=simple
 User=bybit-n8n
 Group=bybit-n8n
-WorkingDirectory=/opt/bybit-demo-risk-reporter
-EnvironmentFile=/etc/bybit-demo-risk-reporter.env
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@APP_DIR@/.env
 Environment=DYNAMIC_PROTECTION_PORT=38636
 Environment=BYBIT_API_BASE=https://api-demo.bybit.com
 Environment=BYBIT_TRADING_MODE=demo
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 /opt/bybit-demo-risk-reporter/dynamic_protection_service.py
+Environment=PATH=@APP_DIR@/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@APP_DIR@/.venv/bin/python @APP_DIR@/dynamic_protection_service.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
