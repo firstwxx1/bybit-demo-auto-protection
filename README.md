@@ -168,19 +168,41 @@ n8n 只需要访问两个 loopback 地址：
 
 ## 控制面板一键部署（Ubuntu/Debian VPS）
 
-支持 aaPanel/宝塔等面板提供的 **主机 root 终端**，不需要手工创建 Python 环境或 systemd 文件：
+支持 aaPanel/宝塔等控制面板提供的 **Ubuntu/Debian 服务器主机终端**。不要在 Docker 容器终端内运行；若面板终端当前不是 root，请先切换为 root。安装器会处理系统依赖、Python 虚拟环境、项目依赖、`.env`、systemd 服务和离线测试，无需手工创建这些文件。
 
-1. 在面板的 Git/文件管理功能中，将本仓库克隆到服务器目录，例如 `/opt/bybit-demo-risk-reporter`。也可以在终端执行：
-   `git clone https://github.com/firstwxx1/bybit-demo-auto-protection.git /opt/bybit-demo-risk-reporter`
-2. 打开控制面板的服务器终端，以 root 身份运行：
-   `bash /opt/bybit-demo-risk-reporter/deploy/install_bybit_demo.sh`
-3. 安装器会安装 Python 依赖、建立专用运行账户和虚拟环境、生成 `.env`、安装并启动两个本机服务、运行离线测试，然后打开中文配置面板。
-4. 在配置面板选择 `1` 填入 Bybit 主网 Demo Trading API Key/Secret；可选的模型和 Telegram 分别选择 `2`、`3`。密钥输入不回显，配置文件权限为 `600`。
-5. 保持 `PROTECTION_EXECUTION_ENABLED=false` 和 `ACTIVE_CLOSE_EXECUTION_ENABLED=false`，先验证报告与 n8n 工作流。
+### 首次安装
 
-安装器针对 Ubuntu/Debian + systemd。请在 VPS **主机终端**运行，不要在 Docker 容器内运行。它不会开放公网端口；两个 bridge 仅监听 `127.0.0.1`。服务单元会按实际仓库目录生成，因此仓库不在 `/opt/bybit-demo-risk-reporter` 时也可安装；若使用不同目录，n8n 工作流中的 bridge 地址仍是 loopback，需要在同一网络环境运行 n8n。
+```bash
+git clone https://github.com/firstwxx1/bybit-demo-auto-protection.git /opt/bybit-demo-risk-reporter
+cd /opt/bybit-demo-risk-reporter
+bash deploy/install_bybit_demo.sh
+```
 
-安装完成后，在服务器上检查：
+### 已安装项目的更新
+
+```bash
+cd /opt/bybit-demo-risk-reporter
+git pull --ff-only
+bash deploy/install_bybit_demo.sh
+```
+
+如果项目已克隆到其他路径，请把上面命令中的目录替换为实际路径。安装器会按项目实际路径生成服务配置。
+
+### 在中文配置面板填写密钥
+
+安装及测试结束后会打开中文配置菜单：
+
+1. 选择 `1`，填写 **Bybit 主网 Production Demo Trading** API Key 和 Secret。输入密钥时不会回显。
+2. 模型和 Telegram 是可选配置，分别选择 `2`、`3`；暂时不用可跳过。
+3. 选择 `0` 退出配置面板。
+
+`.env` 会限制为仅 root 可读写（权限 `0600`）。先保持 `PROTECTION_EXECUTION_ENABLED=false` 和 `ACTIVE_CLOSE_EXECUTION_ENABLED=false`。这是安全默认值：先只生成报告，不更新 TP/SL、不主动平仓。
+
+安装器适用于 Ubuntu/Debian + systemd。它不会开放公网端口；两个 HTTP 服务都只绑定 `127.0.0.1`。
+
+### 检查安装并发起只读报告
+
+在服务器主机终端依次执行：
 
 ```bash
 curl http://127.0.0.1:38635/healthz
@@ -188,6 +210,26 @@ curl http://127.0.0.1:38636/healthz
 systemctl status bybit-demo-report-http.service --no-pager
 systemctl status bybit-demo-dynamic-protection.service --no-pager
 ```
+
+健康检查正常后，可以手动发起一次只读报告请求：
+
+```bash
+curl -sS -X POST http://127.0.0.1:38635/report \
+  -H 'Content-Type: application/json' \
+  --data '{"paper_only":true,"trading_mode":"demo"}'
+```
+
+如果 Demo Trading 账户尚无 USDT 线性永续仓位，报告可能提示没有持仓；程序不会替你开仓。
+
+### 配置 n8n
+
+确认两个本机服务正常后，在 n8n 导入服务器仓库中的工作流文件：
+
+```text
+/opt/bybit-demo-risk-reporter/n8n/bybit-demo-risk-report.15-node-reconstructed.json
+```
+
+先保持工作流关闭并手动测试。工作流里的 `127.0.0.1` 必须能访问运行 Python 服务的环境。如果 n8n 在 Docker 容器内，容器中的 `127.0.0.1` 指向容器本身，不是 VPS 主机；应先配置 n8n 到主机服务的安全、可达网络路径。不要为了连通而把 `38635` 或 `38636` 端口开放到公网。
 
 ## systemd 部署
 
