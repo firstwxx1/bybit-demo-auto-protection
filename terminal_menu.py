@@ -2,7 +2,12 @@
 
 覆盖：BYBIT API、模型 API（GPT + Grok）、Telegram、保护参数、
 实时查询、自动周期、仅报告模式、Telegram 连接测试、保护状态查看、
-定时任务提示、离线测试。
+自动推送任务管理（cron 安装 / 关闭 / 改间隔）。
+
+自动推送任务：
+  面板直接把 /etc/cron.d/bybit-demo-auto 写出来，并强制 cron 重载
+  （touch 到下一秒），避免出现「改了文件但 cron 还用旧表」的问题。
+  需要 root 权限（从服务器 root 终端运行本面板）。
 """
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +26,12 @@ ROOT = Path(__file__).resolve().parent
 ENV_PATH = ROOT / ".env"
 LOG_DIR = ROOT / "logs"
 STATE_DIR = ROOT / "state"
+
+# --- 自动推送任务（cron）---
+CRON_FILE = Path("/etc/cron.d/bybit-demo-auto")
+CRON_JOB_USER = "bybit-n8n"
+CRON_LOG = "logs/auto-runner.log"
+DEFAULT_INTERVAL_MINUTES = 30
 
 # --- BYBIT 模拟盘密钥 ---
 BYBIT_CREDENTIAL_KEYS = (
@@ -116,6 +128,171 @@ def _masked(value: str) -> str:
 
 
 # ============================================================
+# 自动推送任务（cron）工具
+# ============================================================
+
+def _cron_schedule(interval_minutes: int) -> str:
+    """把「每 N 分钟」翻译成合法 cron 时间字段。
+
+    cron 的 */N 只有在 N 整除 60 时才成立（*/90 表示「第 0 分钟」，实际永不触发）。
+    规则：
+      - N 整除 60（1/2/3/4/5/6/10/12/15/20/30/60）→ */N
+      - N 是 60 的整数倍且 >60（120/180…）→ 0 */(N/60)
+      - 其余（如 90）→ 退化为整点倍率不成立，用最近可表达的间隔并提示
+    """
+    interval = max(1, int(interval_minutes))
+    if interval < 60:
+        if 60 % interval == 0:
+            return f"*/{interval} * * * *"
+        # 不能整除 60：用「每 60/N 分钟」的合法近似
+        valid = [m for m in (1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30) if m <= interval]
+        nearest = max(valid) if valid else 1
+        return f"*/{nearest} * * * *"
+    if interval == 60:
+        return "0 * * * *"
+    if interval % 60 == 0:
+        return f"0 */{interval // 60} * * *"
+    # 大于 60 且非整小时倍率（如 90）：退化为最近的整点倍率
+    hours = max(1, round(interval / 60))
+    return f"0 */{hours} * * *"
+
+
+def cron_job_line(interval_minutes: int) -> str:
+    """生成 cron 作业行：先 source .env 注入密钥/开关，再跑 auto_runner.py。"""
+    interval = max(1, int(interval_minutes))
+    schedule = _cron_schedule(interval)
+    return (
+        f"{schedule} {CRON_JOB_USER} "
+        f"set -a; . {ROOT}/.env; set +a; "
+        f"cd {ROOT} && ./.venv/bin/python auto_runner.py >> {CRON_LOG} 2>&1"
+    )
+
+
+def render_cron_file(interval_minutes: int) -> str:
+    interval = max(1, int(interval_minutes))
+    return (
+        f"# Bybit Demo 自动风控 — 每 {interval} 分钟运行一次"
+        f"，生成报告 + 维护 TP/SL + Telegram 推送\n"
+        f"# 先 source .env 把密钥/开关注入环境，再运行 auto_runner.py\n"
+        f"SHELL=/bin/bash\n"
+        f"PATH=/usr/local/bin:/usr/bin:/bin\n"
+        f"{cron_job_line(interval)}\n"
+    )
+
+
+def cron_interval_minutes() -> int | None:
+    """读取当前 cron 文件里的间隔；未安装或解析失败返回 None。"""
+    if not CRON_FILE.exists():
+        return None
+    try:
+        text = CRON_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" in line.split()[0]:
+            continue
+        parts = line.split()
+        if len(parts) < 5 or "auto_runner.py" not in line:
+            continue
+        minute_field = parts[0]
+        hour_field = parts[1]
+        if minute_field.startswith("*/"):
+            try:
+                return int(minute_field[2:])
+            except ValueError:
+                return None
+        if minute_field == "0" and hour_field.startswith("*/"):
+            try:
+                return int(hour_field[2:]) * 60
+            except ValueError:
+                return None
+        if minute_field == "0" and hour_field == "*":
+            return 60  # 每小时整点
+        if minute_field.isdigit() and hour_field == "*":
+            return 60
+        return None
+    return None
+
+
+def cron_installed() -> bool:
+    return cron_interval_minutes() is not None
+
+
+def _force_cron_reload() -> None:
+    """把 cron 文件 mtime 推到「当前秒 + 1」，强制 cron 重新读盘。
+
+    cron 只在文件 mtime 比上次记录更新（且跨过整秒边界）时才重载。
+    面板内用 sed / 覆盖写文件常在 1 秒内完成，mtime 不变 → cron 继续用旧表，
+    这正是之前「改成 */30 却还在每分钟跑」的根因。这里统一把 mtime 推后一格。
+    """
+    now = time.time()
+    stamp = int(now) + 1
+    try:
+        os.utime(CRON_FILE, (stamp, stamp))
+    except OSError:
+        subprocess.run(["touch", "-d", f"@{stamp}", str(CRON_FILE)], check=False)
+    try:
+        subprocess.run(["systemctl", "restart", "cron"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        pass
+    time.sleep(0.5)
+
+
+def cron_last_run() -> str:
+    """从 journal 里找最近一次自动运行的时间；读不到就退回日志文件的运行时间。"""
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", "cron", "--no-pager", "-n", "200"],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        proc = None
+    if proc is not None:
+        for line in reversed(proc.stdout.splitlines()):
+            if "auto_runner.py" in line and "CMD" in line:
+                return "cron: " + line.strip()[:110]
+
+    # 非 root 用户读不到 cron journal，退回日志文件里的最近运行时间。
+    fallback = _log_last_run_timestamp()
+    if fallback:
+        return fallback
+    return "（暂无自动运行记录）"
+
+
+def _log_last_run_timestamp() -> str | None:
+    """从 logs/auto-runner.log 里取最后一次运行的时间戳行。"""
+    log_file = LOG_DIR / CRON_LOG.split("/")[-1]
+    if not log_file.exists():
+        return None
+    try:
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("时间：") or stripped.startswith("时间:"):
+            last = "log: " + stripped
+    try:
+        mtime = datetime.fromtimestamp(log_file.stat().st_mtime, timezone.utc)
+    except OSError:
+        mtime = None
+    if mtime is not None:
+        return f"{last}  （文件最后写入 {mtime.strftime('%Y-%m-%d %H:%M:%S UTC')}）"
+    return last
+
+
+def _cron_status_text() -> str:
+    if platform.system() != "Linux":
+        return "🔴 未启用（仅 Linux/cron 支持）"
+    interval = cron_interval_minutes()
+    if interval is None:
+        return "🔴 未启用"
+    return f"🟢 已启用（每 {interval} 分钟）"
+
+
+# ============================================================
 # 状态显示
 # ============================================================
 
@@ -203,12 +380,6 @@ def _protection_orders_status(values: dict[str, str]) -> str:
         return "  ❌ 读取失败"
 
 
-def _cron_hint() -> str:
-    if platform.system() == "Windows":
-        return "Windows 请使用任务计划程序"
-    return "*/30 * * * * cd /root/bybit-demo-auto-protection && .venv/bin/python auto_runner.py >> logs/auto-runner.log 2>&1"
-
-
 # Compatibility/config helpers used by unattended setup and tests.
 CREDENTIAL_KEYS = (
     "BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET",
@@ -279,6 +450,7 @@ def render_menu(values: dict[str, str] | None = None) -> str:
     tg = _telegram_status(values)
     prot = _protection_status(values)
     cb = _circuit_breaker_status(values)
+    cron = _cron_status_text()
 
     lines = [
         "",
@@ -287,6 +459,7 @@ def render_menu(values: dict[str, str] | None = None) -> str:
         "╠══════════════════════════════════════════════════════════╣",
         f"║  BYBIT: {bybit}  GPT: {gpt}  Grok: {grok}",
         f"║  TG: {tg}  保护: {prot}  熔断: {cb}",
+        f"║  自动推送: {cron}",
         "╠══════════════════════════════════════════════════════════╣",
         "║  【配置】                                                ",
         "║  1. BYBIT API     （主网 Demo Trading key / secret）     ",
@@ -294,13 +467,16 @@ def render_menu(values: dict[str, str] | None = None) -> str:
         "║  3. Telegram    （机器人 token / 聊天 ID）               ",
         "║  4. 保护参数    （止损 / 止盈 / 缓存 / 熔断）            ",
         "║  5. 查看完整配置                                        ",
-        "║  I. 一键部署服务（Ubuntu/Debian VPS，需 root）           ",
+        "║                                                          ",
+        "║  【自动推送】                                            ",
+        "║  T. 开启自动推送任务（按间隔定时跑 + TG 推送）           ",
+        "║  U. 关闭自动推送任务                                     ",
+        "║  V. 修改推送间隔（分钟）                                 ",
         "║                                                          ",
         "║  【运行】                                                ",
         "║  6. 运行完整周期（报告 + 止盈止损 + TG 推送）             ",
         "║  7. 仅运行报告（不挂单、不推送）                         ",
         "║  8. 查询 BYBIT 实际持仓（只读 GET）                        ",
-        "║  9. 运行本地离线样例报告                                 ",
         "║                                                          ",
         "║  【开关】                                                ",
         "║  A. 切换保护执行开关（默认关闭）                         ",
@@ -310,8 +486,7 @@ def render_menu(values: dict[str, str] | None = None) -> str:
         "║  B. 测试 Telegram 连接                                   ",
         "║  C. 查看保护状态文件（托管单 + 熔断）                    ",
         "║  D. 查看最近 50 行日志                                   ",
-        "║  E. 定时任务（Cron）配置提示                             ",
-        "║  F. 运行测试套件                                         ",
+        "║  G. 查看自动推送任务状态（cron + 最近运行）              ",
         "║                                                          ",
         "║  0. 退出                                                 ",
         "╠══════════════════════════════════════════════════════════╣",
@@ -490,6 +665,10 @@ def _action_full_status(path: Path) -> None:
     orders = _protection_orders_status(values)
     print(orders)
     print()
+    print("══ 自动推送任务 ══")
+    print(f"  状态: {_cron_status_text()}")
+    print(f"  配置文件: {CRON_FILE}")
+    print()
     print("══ 环境信息 ══")
     print(f"  Python: {sys.version.split()[0]}")
     print(f"  配置文件: {path}")
@@ -548,20 +727,6 @@ def _action_query_positions(path: Path) -> None:
     )
 
 
-def _action_offline_fixture(path: Path) -> None:
-    fixture = ROOT / "examples" / "eth-short.json"
-    if not fixture.exists():
-        print(f"\n  ❌ 样例文件不存在: {fixture}")
-        return
-    print("\n  ▶ 正在运行离线样例报告...\n")
-    subprocess.run(
-        [sys.executable, str(ROOT / "auto_runner.py"),
-         "--fixture", str(fixture),
-         "--no-protection", "--no-telegram"],
-        cwd=ROOT,
-    )
-
-
 # ============================================================
 # 开关操作
 # ============================================================
@@ -587,6 +752,156 @@ def _action_toggle_protection(path: Path) -> None:
         values["PROTECTION_EXECUTION_ENABLED"] = "false"
         save_env(path, values)
         print("  ✅ 保护执行已关闭: 🔴")
+
+
+# ============================================================
+# 自动推送任务操作
+# ============================================================
+
+def _read_interval_from_user(default: int = DEFAULT_INTERVAL_MINUTES) -> int | None:
+    print("  常用间隔：1 / 5 / 10 / 15 / 20 / 30 / 60 / 120 分钟")
+    while True:
+        raw = input(f"  推送间隔（分钟）[{default}]: ").strip()
+        if not raw:
+            return default
+        if not raw.isdigit():
+            print("  ❌ 请输入正整数。")
+            continue
+        value = int(raw)
+        if value < 1:
+            print("  ❌ 至少 1 分钟。")
+            continue
+        if value > 1440:
+            print("  ❌ 上限 1440 分钟（24 小时）。")
+            continue
+        return value
+
+
+def _write_cron(interval: int) -> bool:
+    """写 cron 文件并强制重载。返回是否成功。"""
+    if platform.system() != "Linux":
+        print("  ❌ 自动推送任务仅支持 Linux（cron）。Windows 请用任务计划程序。")
+        return False
+    if os.geteuid() != 0:
+        print("  ❌ 需要 root 权限写 /etc/cron.d/。请从服务器 root 终端运行本面板，")
+        print("     或用: sudo python3 terminal_menu.py")
+        return False
+    try:
+        CRON_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CRON_FILE.write_text(render_cron_file(interval), encoding="utf-8")
+        os.chmod(CRON_FILE, 0o644)
+    except OSError as exc:
+        print(f"  ❌ 写入 {CRON_FILE} 失败: {exc}")
+        return False
+    _force_cron_reload()
+    return True
+
+
+def _action_enable_auto_push(path: Path) -> None:
+    values = load_env(path)
+    print()
+    print("══ 开启自动推送任务 ══")
+    if platform.system() != "Linux":
+        print("  仅支持 Linux（cron）。")
+        return
+    if not values.get("BYBIT_DEMO_API_KEY"):
+        print("  ❌ 请先配置 BYBIT API（菜单 1）")
+        return
+    if not (values.get("TELEGRAM_BOT_TOKEN") and values.get("TELEGRAM_CHAT_ID")):
+        print("  ⚠️ Telegram 未完整配置，任务会跑但推送会失败。可先用菜单 3 配好。")
+        print()
+
+    existing = cron_interval_minutes()
+    if existing is not None:
+        print(f"  当前已启用：每 {existing} 分钟。")
+        answer = input("  重新设置间隔？(y/N): ").strip().lower()
+        interval = _read_interval_from_user(existing) if answer == "y" else existing
+    else:
+        interval = _read_interval_from_user(DEFAULT_INTERVAL_MINUTES) or DEFAULT_INTERVAL_MINUTES
+
+    print()
+    print(f"  ▶ 正在写入 {CRON_FILE}（每 {interval} 分钟）...")
+    if not _write_cron(interval):
+        return
+    effective = cron_interval_minutes()
+    print("  ✅ 自动推送任务已开启。")
+    print(f"     计划: {cron_job_line(interval).split(' ', 5)[0]}")
+    if effective is not None and effective != interval:
+        print(f"     ⚠️ cron 无法精确表达 {interval} 分钟，已按每 {effective} 分钟执行。")
+    print(f"     日志: {ROOT / CRON_LOG}")
+    print()
+    print("  提示：cron 采用 UTC 计时；如需立即验证，可用菜单 6 手动跑一次。")
+
+
+def _action_disable_auto_push() -> None:
+    print()
+    print("══ 关闭自动推送任务 ══")
+    if platform.system() != "Linux":
+        print("  仅支持 Linux（cron）。")
+        return
+    if not CRON_FILE.exists():
+        print("  当前未启用，无需关闭。")
+        return
+    if os.geteuid() != 0:
+        print("  ❌ 需要 root 权限删除 /etc/cron.d/bybit-demo-auto。")
+        return
+    answer = input("  确认关闭自动推送任务？(y/N): ").strip().lower()
+    if answer != "y":
+        print("  已取消。")
+        return
+    try:
+        if CRON_FILE.exists():
+            CRON_FILE.unlink()
+    except OSError as exc:
+        print(f"  ❌ 删除失败: {exc}")
+        return
+    _force_cron_reload()
+    if CRON_FILE.exists():
+        print("  ⚠️ 文件仍存在（可能权限异常），请手动检查。")
+        return
+    print("  ✅ 自动推送任务已关闭。")
+
+
+def _action_change_interval() -> None:
+    print()
+    print("══ 修改推送间隔 ══")
+    if platform.system() != "Linux":
+        print("  仅支持 Linux（cron）。")
+        return
+    current = cron_interval_minutes()
+    if current is None:
+        print("  当前未启用。请先用菜单 T 开启。")
+        return
+    if os.geteuid() != 0:
+        print("  ❌ 需要 root 权限修改 /etc/cron.d/bybit-demo-auto。")
+        return
+    interval = _read_interval_from_user(current)
+    if interval is None:
+        return
+    if not _write_cron(interval):
+        return
+    effective = cron_interval_minutes()
+    print(f"  ✅ 推送间隔已改为每 {interval} 分钟。")
+    if effective is not None and effective != interval:
+        print(f"     ⚠️ cron 无法精确表达 {interval} 分钟，实际按每 {effective} 分钟执行。")
+
+
+def _action_auto_push_status() -> None:
+    print()
+    print("══ 自动推送任务状态 ══")
+    print(f"  状态: {_cron_status_text()}")
+    print(f"  配置文件: {CRON_FILE}  {'（存在）' if CRON_FILE.exists() else '（不存在）'}")
+    interval = cron_interval_minutes()
+    if interval is not None:
+        print(f"  计划行: {cron_job_line(interval).split(' ', 5)[0]}")
+        print(f"  执行用户: {CRON_JOB_USER}")
+    print()
+    print("══ 最近一次自动运行 ══")
+    print(f"  {cron_last_run()}")
+    print()
+    print("  说明：")
+    print("  - cron 用 UTC 计时，与服务器 date 一致。")
+    print("  - 若刚改过间隔请等下一次整点触发验证（menu D 看日志）。")
 
 
 # ============================================================
@@ -653,33 +968,6 @@ def _action_view_logs() -> None:
         print(f"  ❌ 日志读取失败: {exc}")
 
 
-def _action_cron_hint() -> None:
-    print()
-    print("══ 定时任务（Cron）配置 ══")
-    print()
-    if platform.system() == "Windows":
-        print("  Windows 请使用任务计划程序：")
-        print(f"  程序: {sys.executable}")
-        print(f"  参数: {ROOT / 'auto_runner.py'}")
-        print(f"  工作目录: {ROOT}")
-        print("  触发器: 每天，每 30 分钟")
-    else:
-        print("  编辑 crontab:")
-        print("  crontab -e")
-        print()
-        print(f"  {_cron_hint()}")
-    print()
-    print("  日志文件: logs/auto-runner.log")
-
-
-def _action_run_tests() -> None:
-    print("\n  ▶ 正在运行测试套件...\n")
-    subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=short"],
-        cwd=ROOT,
-    )
-
-
 # ============================================================
 # 主循环
 # ============================================================
@@ -710,13 +998,17 @@ def run_menu(path: Path = ENV_PATH) -> None:
         "3": lambda: _action_configure_telegram(path),
         "4": lambda: _action_configure_protection(path),
         "5": lambda: _action_full_status(path),
-        "I": lambda: _action_install_services(path),
-        "i": lambda: _action_install_services(path),
+        # 自动推送
+        "T": lambda: _action_enable_auto_push(path),
+        "t": lambda: _action_enable_auto_push(path),
+        "U": lambda: _action_disable_auto_push(),
+        "u": lambda: _action_disable_auto_push(),
+        "V": lambda: _action_change_interval(),
+        "v": lambda: _action_change_interval(),
         # 运行
         "6": lambda: _action_run_auto_cycle(path),
         "7": lambda: _action_run_report_only(path),
         "8": lambda: _action_query_positions(path),
-        "9": lambda: _action_offline_fixture(path),
         # 开关
         "A": lambda: _action_toggle_protection(path),
         "a": lambda: _action_toggle_protection(path),
@@ -727,10 +1019,11 @@ def run_menu(path: Path = ENV_PATH) -> None:
         "c": lambda: _action_view_state(path),
         "D": lambda: _action_view_logs(),
         "d": lambda: _action_view_logs(),
-        "E": lambda: _action_cron_hint(),
-        "e": lambda: _action_cron_hint(),
-        "F": lambda: _action_run_tests(),
-        "f": lambda: _action_run_tests(),
+        "G": lambda: _action_auto_push_status(),
+        "g": lambda: _action_auto_push_status(),
+        # 部署
+        "I": lambda: _action_install_services(path),
+        "i": lambda: _action_install_services(path),
     }
 
     while True:
