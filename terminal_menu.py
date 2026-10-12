@@ -83,6 +83,7 @@ OPTIONAL_DEFAULTS: dict[str, str] = {
     "PROTECTION_FAILURE_LIMIT": "3",
     "NEWS_RSS_ENABLED": "false",
     "NEWS_RSS_URLS": "",
+    "NEWS_MAX_AGE_SECONDS": "86400",
 }
 
 

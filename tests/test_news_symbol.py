@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import unittest
 
+import decision_layer
 import model_clients
 from model_clients import _base_symbol, risk_analysis
 
@@ -80,6 +81,26 @@ class GrokRssFallbackTests(unittest.TestCase):
             model_clients._rss_news = original_rss
         self.assertEqual(result["source"], "publisher-rss")
         self.assertIs(result["evidence_verified"], True)
+
+
+class NewsMaxAgeWindowTests(unittest.TestCase):
+    def setUp(self):
+        self._orig = os.environ.get("NEWS_MAX_AGE_SECONDS")
+
+    def tearDown(self):
+        if self._orig is None:
+            os.environ.pop("NEWS_MAX_AGE_SECONDS", None)
+        else:
+            os.environ["NEWS_MAX_AGE_SECONDS"] = self._orig
+
+    def test_env_window_is_honored(self):
+        os.environ["NEWS_MAX_AGE_SECONDS"] = "86400"
+        self.assertEqual(decision_layer._configured_max_age_seconds(), 86400)
+
+    def test_default_window_used_when_unset(self):
+        os.environ.pop("NEWS_MAX_AGE_SECONDS", None)
+        self.assertEqual(decision_layer._configured_max_age_seconds(),
+                         decision_layer.DEFAULT_NEWS_MAX_AGE_SECONDS)
 
 
 if __name__ == "__main__":
