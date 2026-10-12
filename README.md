@@ -58,6 +58,12 @@ GROK_API_KEY=你的GrokKey
 GROK_API_BASE=https://api.x.ai/v1
 GROK_MODEL=grok-4
 
+# 独立风险源，可选；必须使用与上面不同的凭据和端点
+# 未配置时保持不可用，确定性闸门会持有仓位（fail-closed）
+INDEPENDENT_RISK_API_KEY=你的独立来源Key
+INDEPENDENT_RISK_API_BASE=https://另一个网关.example.com/v1
+INDEPENDENT_RISK_MODEL=独立模型名
+
 # Telegram，可选；工作流默认不携带 credential 绑定
 TELEGRAM_BOT_TOKEN=你的BotToken
 TELEGRAM_CHAT_ID=你的ChatID

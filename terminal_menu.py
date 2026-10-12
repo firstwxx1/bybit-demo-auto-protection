@@ -84,6 +84,9 @@ OPTIONAL_DEFAULTS: dict[str, str] = {
     "NEWS_RSS_ENABLED": "false",
     "NEWS_RSS_URLS": "",
     "NEWS_MAX_AGE_SECONDS": "86400",
+    "INDEPENDENT_RISK_API_BASE": "",
+    "INDEPENDENT_RISK_API_KEY": "",
+    "INDEPENDENT_RISK_MODEL": "",
 }
 
 

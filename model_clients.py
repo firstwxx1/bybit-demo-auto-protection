@@ -245,11 +245,58 @@ def risk_analysis(position: dict[str, Any], fib: dict[str, Any], news: dict[str,
                 "error": f"GPT不可用：{type(exc).__name__}"}
 
 
-def independent_risk_analysis(position: dict[str, Any], fib: dict[str, Any], news: dict[str, Any]) -> dict[str, Any]:
-    """A separately injected assessment is mandatory before an active close.
+INDEPENDENT_RISK_SOURCE_ID = "independent-risk"
 
-    No default network client is supplied for this source: absent explicit local
-    integration it is unavailable and the deterministic gate holds the position.
+
+def _independent_risk_system_prompt() -> str:
+    return (
+        "你是独立的只读持仓风险复核器，与主风险模型不共享凭据或端点。"
+        "只返回JSON对象，字段为risk_level、confidence、recommendation、take_profit、stop_loss。"
+        "recommendation只能是HOLD、TIGHTEN_STOP、CLOSE_POSITION、NO_ACTION、MANUAL_REVIEW_REQUIRED之一。"
+        "不得决定仓位或交易动作。"
+        "take_profit是基于Fib回撤和当前结构的止盈建议，无可靠依据时必须为null。"
+        "stop_loss是基于持仓方向、强平价和当前波动的止损建议价格，无可靠依据时必须为null。"
+        "对于空单：stop_loss必须高于当前标记价且低于强平价，take_profit必须低于当前标记价。"
+        "对于多单：stop_loss必须低于当前标记价且高于强平价，take_profit必须高于当前标记价。"
+    )
+
+
+def independent_risk_analysis(position: dict[str, Any], fib: dict[str, Any], news: dict[str, Any]) -> dict[str, Any]:
+    """Second, independently provisioned risk opinion required before an active close.
+
+    Endpoint, key and model come only from the dedicated INDEPENDENT_RISK_* keys so
+    this source can never reuse the main GPT transport. It additionally refuses to
+    run when it would share the main model's endpoint or credential. When it is not
+    configured the source stays unavailable and the deterministic gate holds the
+    position (fail-closed).
     """
-    del position, fib, news
-    return {"available": False, "source": "independent-risk", "error": "独立风险来源未注入"}
+    key = os.getenv("INDEPENDENT_RISK_API_KEY", "")
+    base = os.getenv("INDEPENDENT_RISK_API_BASE", "")
+    model_id = os.getenv("INDEPENDENT_RISK_MODEL", INDEPENDENT_RISK_SOURCE_ID)
+    if not key or key == "[REDACTED]" or not base or base == "[REDACTED]":
+        return {"available": False, "source": INDEPENDENT_RISK_SOURCE_ID, "model": model_id,
+                "error": "独立风险来源未配置"}
+    main_key = os.getenv("RISK_MODEL_API_KEY", "")
+    main_base = os.getenv("RISK_MODEL_API_BASE", "")
+    if main_key and key == main_key:
+        return {"available": False, "source": INDEPENDENT_RISK_SOURCE_ID, "model": model_id,
+                "error": "独立风险来源与主风险模型共用凭据"}
+    if main_base and base.rstrip("/") == main_base.rstrip("/"):
+        return {"available": False, "source": INDEPENDENT_RISK_SOURCE_ID, "model": model_id,
+                "error": "独立风险来源与主风险模型端点相同"}
+    try:
+        content = _chat(base, key, model_id, _independent_risk_system_prompt(),
+                        {"position": position, "fib": fib, "news": news})
+        if content.startswith("```"):
+            content = content.strip("`").removeprefix("json").strip()
+        result = json.loads(content)
+        if not isinstance(result, dict):
+            raise ValueError("模型输出不是对象")
+        return {"available": True, "source": INDEPENDENT_RISK_SOURCE_ID, "model": model_id,
+                "as_of": datetime.now(timezone.utc).isoformat(), **result}
+    except HTTPError as exc:
+        return {"available": False, "source": INDEPENDENT_RISK_SOURCE_ID, "model": model_id,
+                "error": f"独立风险来源不可用：HTTP {exc.code}"}
+    except (OSError, KeyError, ValueError, json.JSONDecodeError, TimeoutError) as exc:
+        return {"available": False, "source": INDEPENDENT_RISK_SOURCE_ID, "model": model_id,
+                "error": f"独立风险来源不可用：{type(exc).__name__}"}
