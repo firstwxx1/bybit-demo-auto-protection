@@ -190,6 +190,12 @@ def grok_news(position: dict[str, Any]) -> dict[str, Any]:
                 if rss.get("evidence_verified"):
                     return rss
             return result
+        # Grok answered with prose instead of JSON items (e.g. the proxy ignored
+        # x_search): still try the whitelisted publisher RSS evidence source.
+        if os.getenv("NEWS_RSS_ENABLED", "false").lower() == "true":
+            rss = _rss_news(position["instrument"])
+            if rss.get("evidence_verified"):
+                return rss
         return {"available": True, "source": "grok", "as_of": now,
                 "summary": content.strip(), "items": [], "evidence_verified": False}
     except HTTPError as exc:

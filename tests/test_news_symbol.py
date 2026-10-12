@@ -49,5 +49,38 @@ class RiskModelIdentityTests(unittest.TestCase):
         self.assertEqual(result["source"], model_clients.RISK_SOURCE_ID)
 
 
+class GrokRssFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self._env = {k: os.environ.get(k) for k in
+                     ("GROK_API_KEY", "GROK_API_BASE", "GROK_MODEL", "NEWS_RSS_ENABLED")}
+        os.environ.update({"GROK_API_KEY": "k", "GROK_API_BASE": "https://example.invalid/v1",
+                           "GROK_MODEL": "global:grok-4.7", "NEWS_RSS_ENABLED": "true"})
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_prose_output_falls_back_to_publisher_rss(self):
+        original_search = model_clients._grok_x_search
+        original_rss = model_clients._rss_news
+        model_clients._grok_x_search = lambda *a, **k: "I'll search X for recent posts."
+        model_clients._rss_news = lambda inst: {
+            "available": True, "source": "publisher-rss", "as_of": "2026-01-01T00:00:00+00:00",
+            "items": [{"headline": "ETH news", "published_at": "2026-01-01T00:00:00+00:00",
+                       "source_url": "https://example.invalid/eth"}],
+            "evidence_verified": True,
+        }
+        try:
+            result = model_clients.grok_news({"instrument": "ETHUSDT"})
+        finally:
+            model_clients._grok_x_search = original_search
+            model_clients._rss_news = original_rss
+        self.assertEqual(result["source"], "publisher-rss")
+        self.assertIs(result["evidence_verified"], True)
+
+
 if __name__ == "__main__":
     unittest.main()
