@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import os
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -43,7 +44,8 @@ def _grok_x_search(base: str, key: str, model: str, instrument: str) -> str:
         "input": [{"role": "system", "content": (
             "Search X for current, public posts relevant to the instrument. "
             "Return only JSON with summary, as_of, and items. Each item must have "
-            "headline, published_at as an ISO-8601 timestamp, and source_url. "
+            "headline, published_at as an ISO-8601 timestamp, source_url, and a "
+            "severity of critical|high|medium|low. "
             "Do not invent posts or URLs."
         )}, {"role": "user", "content": (
             f"Find credible news or material market updates for {instrument} from the last 24 hours."
@@ -75,6 +77,61 @@ def _base_symbol(instrument: str) -> str:
             base = base[: -len(suffix)]
             break
     return base.lower()
+
+
+# Deterministic news severity classification. The gate in decision_layer
+# only lets CLOSE_POSITION through when at least one news item carries a
+# high/critical severity, so this replaces a model guess with auditable
+# keyword evidence. It is intentionally biased towards under-reporting:
+# a headline only reaches high/critical on unambiguous market events.
+SEVERITY_LEVELS = ("critical", "high", "medium", "low")
+
+_SEVERITY_RULES = (
+    ("critical", (
+        r"\bhack(?:ed|er|ers|ing)?\b", r"\bexploit(?:ed|s)?\b", r"\bbreach(?:ed)?\b",
+        r"\bdrain(?:ed|s)?\b", r"\bdepegged?\b", r"\binsolven(?:cy|t)\b",
+        r"\bbankrupt(?:cy)?\b", r"\bblockchain halt\b", r"\bnetwork halt\b",
+        r"\bemergency (?:halt|shutdown)\b", r"\bcollaps(?:e|ed)\b",
+        r"被盗", r"被黑", r"遭黑客", r"脱锚", r"破产", r"暂停交易", r"崩溃", r"清算潮",
+    )),
+    ("high", (
+        r"\bsec\b.*\b(?:sue|sues|sued|lawsuit|charges|charges|probe|investigat)\w*\b",
+        r"\bdoj\b", r"\bindict(?:ed|ment)?\b", r"\blawsuit\b", r"\bsues?\b",
+        r"\bban(?:ned|s)?\b", r"\bdelist(?:ed|ing)?\b", r"\bblacklist(?:ed)?\b",
+        r"\bcircuit breaker\b", r"\btrading halt(?:ed)?\b", r"\boutage\b",
+        r"\bliquidat(?:e|ed|ion|ions)\b", r"\bflash crash\b", r"\bplunge[ds]?\b",
+        r"\btumbl(?:e|ed|es)\b", r"\bslump(?:ed|s)?\b", r"\bcrash(?:ed|es)?\b",
+        r"\bsurge[ds]?\b", r"\brall(?:y|ied|ies)\b", r"\ball[- ]time high\b",
+        r"\brecord high\b", r"\bdefault(?:ed|s)?\b", r"\bsolven(?:cy|t)\b",
+        r"\bhalt(?:ed|s)?\b", r"\bfreeze[ds]?\b",
+        r"被起诉", r"遭起诉", r"下架", r"封禁", r"暴跌", r"崩盘", r"史上新高", r"创新高", r"暂停",
+    )),
+    ("medium", (
+        r"\blist(?:ed|s|ing)?\b", r"\bpartnership\b", r"\bpartner(?:s|ed)?\b",
+        r"\bintegrat(?:e|ed|ion)\b", r"\bupgrade[ds]?\b", r"\bhalving\b",
+        r"\bburn(?:ed|s)?\b", r"\bstaking\b", r"\badoption\b", r"\bfunding\b",
+        r"\bunlock(?:ed|s)?\b", r"\bairdrop(?:s)?\b", r"\bmainnet\b",
+        r"上线", r"合作", r"升级", r"减半", r"销毁", r"质押", r"解锁", r"空投", r"主网",
+    )),
+)
+
+
+def _classify_severity(headline: str) -> str:
+    """Return critical/high/medium/low from auditable headline keywords."""
+    text = str(headline or "").lower()
+    for level, patterns in _SEVERITY_RULES:
+        for pattern in patterns:
+            if re.search(pattern, text):
+                return level
+    return "low"
+
+
+def _normalize_severity(value: Any, headline: str) -> str:
+    """Keep an explicitly supplied valid level, otherwise classify the headline."""
+    text = str(value or "").strip().lower()
+    if text in SEVERITY_LEVELS:
+        return text
+    return _classify_severity(headline)
 
 
 def _rss_news(instrument: str) -> dict[str, Any]:
@@ -116,7 +173,7 @@ def _rss_news(instrument: str) -> dict[str, Any]:
                     published = published.replace(tzinfo=timezone.utc)
                 age = (now - published.astimezone(timezone.utc)).total_seconds()
                 if -30 <= age <= max_age:
-                    items.append({"headline": title, "published_at": published.astimezone(timezone.utc).isoformat(), "source_url": urljoin(feed_url, link)})
+                    items.append({"headline": title, "published_at": published.astimezone(timezone.utc).isoformat(), "source_url": urljoin(feed_url, link), "severity": _classify_severity(title)})
         except (OSError, ValueError, ElementTree.ParseError):
             continue
     unique = {item["source_url"]: item for item in items}
@@ -145,7 +202,7 @@ def grok_news(position: dict[str, Any]) -> dict[str, Any]:
                     content = _chat(os.getenv("GROK_API_BASE", "https://api.x.ai/v1"), key,
                                     model_name,
                                     "仅分析与持仓币种相关的新闻和舆情。不得建议下单、仓位、止损或执行交易。"
-                                    "必须返回JSON，items中的每条新闻必须包含headline、published_at、source_url。",
+                                    "必须返回JSON，items中的每条新闻必须包含headline、published_at、source_url、severity（critical/high/medium/low）。",
                                     {"instrument": position["instrument"]})
                 selected_model = model_name
                 break
@@ -162,6 +219,9 @@ def grok_news(position: dict[str, Any]) -> dict[str, Any]:
             parsed = None
         if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
             items = parsed["items"]
+            for item in items:
+                if isinstance(item, dict):
+                    item["severity"] = _normalize_severity(item.get("severity"), str(item.get("headline", "")))
             verified = bool(items) and all(isinstance(item, dict) and item.get("headline")
                                            and item.get("published_at") and item.get("source_url") for item in items)
             if verified:

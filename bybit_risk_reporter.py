@@ -416,6 +416,15 @@ def build_report(snapshot: dict[str, Any], *, stop_pct: float | None = None) -> 
             snapshot.get("grok", {}).get("summary")
             if snapshot.get("grok", {}).get("evidence_verified") is True
             else "新闻证据未通过校验，原始摘要不纳入报告"
+        ) + (
+            "（最高严重度：" + max(
+                (str(i.get("severity", "low")).lower()
+                 for i in snapshot.get("grok", {}).get("items", []) if isinstance(i, dict)),
+                key=lambda level: {"critical": 3, "high": 2, "medium": 1}.get(level, 0),
+                default="low",
+            ) + "）"
+            if snapshot.get("grok", {}).get("evidence_verified") is True
+            else ""
         ) + "**",
         "**持仓风险：**", *risks,
         "**说明：仅根据Bybit Demo实际持仓币种分析，不显示固定BTC价格；不执行交易。**",
