@@ -158,7 +158,7 @@ def evaluate_decision(position: dict[str, Any], news: dict[str, Any], model_resu
         )
         return base(Action.MANUAL_REVIEW_REQUIRED, reason, model_results)
     sol = next(row for row in model_results if row["source"] == "gpt-5.6-sol")
-    if sol.get("model") != "gpt-5.6-sol":
+    if sol.get("model") != os.getenv("RISK_MODEL", "gpt-5.6-sol"):
         return base(Action.MANUAL_REVIEW_REQUIRED, "SOL_MODEL_IDENTITY_INVALID", model_results)
     recommendations = []
     for row in model_results:

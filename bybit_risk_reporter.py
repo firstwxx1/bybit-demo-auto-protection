@@ -323,7 +323,7 @@ def build_report(snapshot: dict[str, Any], *, stop_pct: float | None = None) -> 
     if not model_ok:
         model_status = f"不可用：{model_reason}"
     else:
-        model_status = f"可用：{model.get('model', 'gpt-5.6-sol')}"
+        model_status = f"可用：{model.get('model') or os.getenv('RISK_MODEL', 'gpt-5.6-sol')}"
     if not independent_model_ok:
         independent_status = f"不可用：{independent_model.get('error', '独立风险来源不可用')}"
     else:

@@ -66,9 +66,9 @@ REQUIRED_TG_KEYS = (
 OPTIONAL_DEFAULTS: dict[str, str] = {
     "BYBIT_API_BASE": "https://api-demo.bybit.com",
     "GROK_API_BASE": "https://api.x.ai/v1",
-    "GROK_MODEL": "grok-4",
+    "GROK_MODEL": "global:grok-4.7",
     "RISK_MODEL_API_BASE": "",
-    "RISK_MODEL": "gpt-5.6-sol",
+    "RISK_MODEL": "global:gpt-6-sol",
     "TELEGRAM_CHAT_ID": "",
     "POSITION_CACHE_PATH": "state/last-successful-positions.json",
     "FIXED_STOP_ENTRY_PCT": "0.04855847842644323",
@@ -81,6 +81,8 @@ OPTIONAL_DEFAULTS: dict[str, str] = {
     "ACTIVE_CLOSE_EXECUTION_ENABLED": "false",
     "PROTECTION_STATE_PATH": "state/protection-state.json",
     "PROTECTION_FAILURE_LIMIT": "3",
+    "NEWS_RSS_ENABLED": "false",
+    "NEWS_RSS_URLS": "",
 }
 
 
@@ -313,7 +315,7 @@ def _grok_status(values: dict[str, str]) -> str:
 def _gpt_status(values: dict[str, str]) -> str:
     key = values.get("RISK_MODEL_API_KEY", "")
     base = values.get("RISK_MODEL_API_BASE", "")
-    model = values.get("RISK_MODEL", "gpt-5.6-sol")
+    model = values.get("RISK_MODEL", OPTIONAL_DEFAULTS.get("RISK_MODEL", "global:gpt-6-sol"))
     if key and base:
         return f"✅ {model}"
     if key and not base:
@@ -544,7 +546,7 @@ def _action_configure_model(path: Path) -> None:
     values["RISK_MODEL_API_BASE"] = value or current_base or default_base
 
     current_model = values.get("RISK_MODEL", "")
-    default_model = OPTIONAL_DEFAULTS.get("RISK_MODEL", "gpt-5.6-sol")
+    default_model = OPTIONAL_DEFAULTS.get("RISK_MODEL", "global:gpt-6-sol")
     value = _prompt_text("RISK_MODEL（模型名称）", current_model or default_model)
     values["RISK_MODEL"] = value or current_model or default_model
 
@@ -640,7 +642,7 @@ def _action_full_status(path: Path) -> None:
     gpt_key = values.get("RISK_MODEL_API_KEY", "")
     print(f"  RISK_MODEL_API_KEY: {_masked(gpt_key) if gpt_key else '（未配置）'}")
     print(f"  RISK_MODEL_API_BASE: {values.get('RISK_MODEL_API_BASE', '') or '（未配置）'}")
-    print(f"  RISK_MODEL: {values.get('RISK_MODEL', 'gpt-5.6-sol')}")
+    print(f"  RISK_MODEL: {values.get('RISK_MODEL', OPTIONAL_DEFAULTS.get('RISK_MODEL', 'global:gpt-6-sol'))}")
     print()
     print("══ Grok 新闻模型 ══")
     grok_key = values.get("GROK_API_KEY", "")

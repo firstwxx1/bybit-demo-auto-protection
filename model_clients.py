@@ -13,6 +13,11 @@ from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 
+# Stable source identifier consumed by the deterministic gate (decision_layer).
+# It is an internal key, not the runtime model name.
+RISK_SOURCE_ID = "gpt-5.6-sol"
+
+
 def _chat(base: str, key: str, model: str, system: str, payload: dict[str, Any]) -> str:
     body = json.dumps({
         "model": model,
@@ -58,14 +63,29 @@ def _grok_x_search(base: str, key: str, model: str, instrument: str) -> str:
     raise KeyError("Grok Responses未返回文本")
 
 
+_QUOTE_SUFFIXES = ("USDT", "USDC", "USD", "PERP", "BUSD")
+
+
+def _base_symbol(instrument: str) -> str:
+    """Derive the base asset from an instrument such as ETHUSDT or ETH-USDT."""
+    raw = str(instrument).upper().replace("/", "-").replace(":", "-").replace("_", "-")
+    base = raw.split("-")[0]
+    for suffix in _QUOTE_SUFFIXES:
+        if base.endswith(suffix) and len(base) > len(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base.lower()
+
+
 def _rss_news(instrument: str) -> dict[str, Any]:
     """Collect publisher RSS evidence when the Grok proxy ignores x_search."""
     urls = [url.strip() for url in os.getenv("NEWS_RSS_URLS", "").split(",") if url.strip()]
     if not urls:
         return {"available": False, "summary": "RSS未配置", "items": [], "evidence_verified": False}
-    symbol = instrument.split("-")[0].lower()
+    symbol = _base_symbol(instrument)
     now = datetime.now(timezone.utc)
     max_age = float(os.getenv("NEWS_MAX_AGE_SECONDS", "86400"))
+    fresh_hours = max(1, int(max_age // 3600))
     items: list[dict[str, str]] = []
     for feed_url in urls:
         try:
@@ -101,7 +121,7 @@ def _rss_news(instrument: str) -> dict[str, Any]:
             continue
     unique = {item["source_url"]: item for item in items}
     selected = list(unique.values())[:5]
-    return {"available": bool(selected), "source": "publisher-rss", "model": "deterministic", "as_of": now.isoformat(), "summary": "已通过公开RSS取得最近24小时ETH新闻" if selected else "RSS未取得最近24小时ETH新闻", "items": selected, "evidence_verified": bool(selected)}
+    return {"available": bool(selected), "source": "publisher-rss", "model": "deterministic", "as_of": now.isoformat(), "summary": f"已通过公开RSS取得最近{fresh_hours}小时{symbol.upper()}新闻" if selected else f"RSS未取得最近{fresh_hours}小时{symbol.upper()}新闻", "items": selected, "evidence_verified": bool(selected)}
 
 
 def grok_news(position: dict[str, Any]) -> dict[str, Any]:
@@ -191,6 +211,7 @@ def risk_analysis(position: dict[str, Any], fib: dict[str, Any], news: dict[str,
     base = os.getenv("RISK_MODEL_API_BASE", "")
     if not key or key == "[REDACTED]" or not base or base == "[REDACTED]":
         return {"available": False, "error": "GPT未配置"}
+    model_id = os.getenv("RISK_MODEL", RISK_SOURCE_ID)
     system = (
         "你是只读持仓风险分析器。只返回JSON对象，字段为risk_level、confidence、recommendation、take_profit、stop_loss。"
         "recommendation只能是HOLD、TIGHTEN_STOP、CLOSE_POSITION、NO_ACTION、MANUAL_REVIEW_REQUIRED之一。"
@@ -201,20 +222,20 @@ def risk_analysis(position: dict[str, Any], fib: dict[str, Any], news: dict[str,
         "对于多单：stop_loss必须低于当前标记价且高于强平价，take_profit必须高于当前标记价。"
     )
     try:
-        content = _chat(base, key, os.getenv("RISK_MODEL", "gpt-5.6-sol"), system,
+        content = _chat(base, key, model_id, system,
                         {"position": position, "fib": fib, "news": news})
         if content.startswith("```"):
             content = content.strip("`").removeprefix("json").strip()
         result = json.loads(content)
         if not isinstance(result, dict):
             raise ValueError("模型输出不是对象")
-        return {"available": True, "source": "gpt-5.6-sol", "model": "gpt-5.6-sol",
+        return {"available": True, "source": RISK_SOURCE_ID, "model": model_id,
                 "as_of": datetime.now(timezone.utc).isoformat(), **result}
     except HTTPError as exc:
-        return {"available": False, "source": "gpt-5.6-sol", "model": "gpt-5.6-sol",
+        return {"available": False, "source": RISK_SOURCE_ID, "model": model_id,
                 "error": f"GPT不可用：HTTP {exc.code}"}
     except (OSError, KeyError, ValueError, json.JSONDecodeError, TimeoutError) as exc:
-        return {"available": False, "source": "gpt-5.6-sol", "model": "gpt-5.6-sol",
+        return {"available": False, "source": RISK_SOURCE_ID, "model": model_id,
                 "error": f"GPT不可用：{type(exc).__name__}"}
 
 
