@@ -67,6 +67,38 @@ def _format_telegram_report(report: str, protection_results: list[dict[str, Any]
     return "\n".join(html_lines)
 
 
+def protection_gate(
+    *,
+    enabled: bool,
+    fixture_mode: bool,
+    cached_at: str | None,
+    demo_host_ok: bool,
+    active_close_enabled: bool,
+    has_candidates: bool,
+) -> tuple[str, str | None]:
+    """Fail-closed gate for the dynamic TP/SL execution path.
+
+    Returns ``(status, reason)``.  ``EXECUTE`` is the only status that may
+    reach the exchange.  Report-only, fixture, cache, wrong-host, an armed
+    active-close switch, and a missing validated candidate all block, in that
+    order, so a mutation can never happen without a fresh, realtime, isolated
+    and validated request.
+    """
+    if not enabled:
+        return ("DISABLED", None)
+    if fixture_mode:
+        return ("FIXTURE_EXECUTION_BLOCKED", None)
+    if cached_at is not None:
+        return ("STALE_POSITION_BLOCKED", None)
+    if not demo_host_ok:
+        return ("BLOCKED", "Bybit Demo host and trading mode are required")
+    if active_close_enabled:
+        return ("BLOCKED", "active-close execution must be isolated from dynamic protection")
+    if not has_candidates:
+        return ("NO_VALID_CANDIDATE", None)
+    return ("EXECUTE", None)
+
+
 def _load_fixture(path: Path) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]], list[dict[str, Any]]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     positions = payload.get("positions", [payload.get("position")])
@@ -140,16 +172,20 @@ def run_auto_cycle(*, enabled: bool, fixture: Path | None = None, send_tg: bool 
         if stop_loss is not None:
             candidates[instrument] = {"stop_loss": stop_loss, "take_profit": take_profit}
 
+    demo_host_ok = (
+        os.getenv("BYBIT_TRADING_MODE", "demo").strip().lower() == "demo"
+        and os.getenv("BYBIT_API_BASE", BYBIT_BASE_URL).rstrip("/") == BYBIT_BASE_URL
+    )
+    status, reason = protection_gate(
+        enabled=enabled,
+        fixture_mode=fixture_mode,
+        cached_at=cached_at,
+        demo_host_ok=demo_host_ok,
+        active_close_enabled=env_enabled(os.getenv("ACTIVE_CLOSE_EXECUTION_ENABLED")),
+        has_candidates=bool(candidates),
+    )
     protection_results: list[dict[str, Any]] = []
-    if not enabled:
-        protection_results = [{"instrument": p.get("instrument"), "status": "DISABLED"} for p in positions]
-    elif fixture_mode:
-        protection_results = [{"instrument": p.get("instrument"), "status": "FIXTURE_EXECUTION_BLOCKED"} for p in positions]
-    elif cached_at is not None:
-        protection_results = [{"instrument": p.get("instrument"), "status": "STALE_POSITION_BLOCKED"} for p in positions]
-    elif os.getenv("BYBIT_TRADING_MODE", "demo").strip().lower() != "demo" or os.getenv("BYBIT_API_BASE", BYBIT_BASE_URL).rstrip("/") != BYBIT_BASE_URL:
-        protection_results = [{"instrument": p.get("instrument"), "status": "BLOCKED", "reason": "Bybit Demo host and trading mode are required"} for p in positions]
-    elif candidates:
+    if status == "EXECUTE":
         client = BybitDemoClient(
             os.getenv("BYBIT_DEMO_API_KEY", ""),
             os.getenv("BYBIT_DEMO_API_SECRET", ""),
@@ -159,7 +195,14 @@ def run_auto_cycle(*, enabled: bool, fixture: Path | None = None, send_tg: bool 
         engine = BybitProtectionEngine(client, state_path, enabled=True)
         protection_results = engine.reconcile_dynamic(positions, candidates)
     else:
-        protection_results = [{"instrument": p.get("instrument"), "status": "NO_VALID_CANDIDATE"} for p in positions]
+        protection_results = [
+            (
+                {"instrument": p.get("instrument"), "status": status}
+                if reason is None
+                else {"instrument": p.get("instrument"), "status": status, "reason": reason}
+            )
+            for p in positions
+        ]
 
     combined_report = "\n\n".join(all_reports)
     tg_result = send_telegram(_format_telegram_report(combined_report, protection_results)) if send_tg else {"ok": False, "skipped": True}
