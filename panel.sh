@@ -105,7 +105,7 @@ get_runtime_status() {
       return
     fi
   fi
-  if pgrep -f "$PROJECT_NAME" >/dev/null 2>&1; then
+  if ps -eo pid,args 2>/dev/null | grep -F "$PROJECT_NAME" | grep -Ev "(^[[:space:]]*($$|${PPID})[[:space:]]|panel\.sh|toolbox|grep|sshd:)" >/dev/null 2>&1; then
     echo "running (process)"
     return
   fi
