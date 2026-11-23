@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # One-click installer for Ubuntu/Debian VPS control-panel terminals (e.g. aaPanel/宝塔).
 set -Eeuo pipefail
 
